@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Echo Voice</title>
+    <style>
+      :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #101114; }
+      main { width: min(34rem, calc(100% - 2rem)); text-align: center; }
+      h1 { margin-bottom: .4rem; font-size: 2.2rem; }
+      p { color: #aeb4bf; line-height: 1.5; }
+      button { margin: 1.2rem 0; padding: .85rem 1.4rem; border: 0; border-radius: 999px;
+        background: #58d68d; color: #07130c; font: inherit; font-weight: 700; cursor: pointer; }
+      button[data-running="true"] { background: #ff6b6b; color: #1d0808; }
+      button:disabled { opacity: .55; cursor: wait; }
+      #status { min-height: 1.5rem; color: #e7e9ed; }
+      #transcript { min-height: 3rem; padding: 1rem; border: 1px solid #2c3038;
+        border-radius: .8rem; background: #181a1f; text-align: left; }
+      input { width: min(22rem, calc(100% - 2rem)); padding: .65rem .8rem; border-radius: .5rem;
+        border: 1px solid #383d47; background: #181a1f; color: inherit; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Echo Voice</h1>
+      <p>Start the microphone, speak naturally, then pause. The server will repeat your words.</p>
+      <input id="token" type="password" autocomplete="off" placeholder="Voice token, if configured">
+      <br>
+      <button id="toggle" type="button">Start microphone</button>
+      <div id="status">Ready</div>
+      <p id="transcript">Your transcript will appear here.</p>
+    </main>
+    <script>
+      const button = document.querySelector("#toggle");
+      const status = document.querySelector("#status");
+      const transcript = document.querySelector("#transcript");
+      const token = document.querySelector("#token");
+      let socket;
+      let context;
+      let stream;
+      let captureNode;
+      let captureEnabled = false;
+      let playbackCursor = 0;
+      let resumeTimer;
+
+      function setStatus(message) { status.textContent = message; }
+
+      function websocketUrl() {
+        const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+        const query = token.value ? `?token=${encodeURIComponent(token.value)}` : "";
+        return `${scheme}//${location.host}/voice${query}`;
+      }
+
+      function playPcm(arrayBuffer) {
+        const view = new DataView(arrayBuffer);
+        const samples = new Float32Array(view.byteLength / 2);
+        for (let index = 0; index < samples.length; index += 1) {
+          samples[index] = view.getInt16(index * 2, true) / 32768;
+        }
+        const buffer = context.createBuffer(1, samples.length, 16000);
+        buffer.copyToChannel(samples, 0);
+        const source = context.createBufferSource();
+        source.buffer = buffer;
+        source.connect(context.destination);
+        const startAt = Math.max(context.currentTime + 0.02, playbackCursor);
+        source.start(startAt);
+        playbackCursor = startAt + buffer.duration;
+      }
+
+      async function start() {
+        button.disabled = true;
+        setStatus("Requesting microphone access...");
+        try {
+          context = new AudioContext({ latencyHint: "interactive" });
+          await context.audioWorklet.addModule("/audio-processor.js");
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+          });
+          socket = new WebSocket(websocketUrl());
+          socket.binaryType = "arraybuffer";
+
+          await new Promise((resolve, reject) => {
+            socket.addEventListener("open", resolve, { once: true });
+            socket.addEventListener("error", () => reject(new Error("WebSocket connection failed")), { once: true });
+          });
+
+          const source = context.createMediaStreamSource(stream);
+          captureNode = new AudioWorkletNode(context, "pcm-capture");
+          const muted = context.createGain();
+          muted.gain.value = 0;
+          source.connect(captureNode).connect(muted).connect(context.destination);
+          captureNode.port.onmessage = ({ data }) => {
+            if (captureEnabled && socket.readyState === WebSocket.OPEN) socket.send(data);
+          };
+
+          socket.onmessage = async ({ data }) => {
+            if (data instanceof ArrayBuffer) {
+              playPcm(data);
+              return;
+            }
+            const message = JSON.parse(data);
+            if (message.event === "speech_start") setStatus("Listening...");
+            if (message.event === "transcript") transcript.textContent = message.text;
+            if (message.event === "audio_start") {
+              captureEnabled = false;
+              clearTimeout(resumeTimer);
+              setStatus("Speaking...");
+            }
+            if (message.event === "audio_end") {
+              const delay = Math.max(0, playbackCursor - context.currentTime) * 1000 + 100;
+              resumeTimer = setTimeout(() => {
+                captureEnabled = true;
+                setStatus("Listening...");
+              }, delay);
+            }
+            if (message.event === "error") setStatus(`Error: ${message.detail}`);
+          };
+          socket.onclose = () => {
+            if (button.dataset.running === "true") stop("Connection closed");
+          };
+
+          captureEnabled = true;
+          button.dataset.running = "true";
+          button.textContent = "Stop microphone";
+          setStatus("Listening...");
+        } catch (error) {
+          await stop(error.message);
+        } finally {
+          button.disabled = false;
+        }
+      }
+
+      async function stop(message = "Stopped") {
+        captureEnabled = false;
+        clearTimeout(resumeTimer);
+        if (captureNode) captureNode.disconnect();
+        if (stream) stream.getTracks().forEach((track) => track.stop());
+        if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
+        if (context && context.state !== "closed") await context.close();
+        captureNode = null;
+        stream = null;
+        socket = null;
+        context = null;
+        playbackCursor = 0;
+        button.dataset.running = "false";
+        button.textContent = "Start microphone";
+        setStatus(message);
+      }
+
+      button.addEventListener("click", () => {
+        if (button.dataset.running === "true") stop();
+        else start();
+      });
+    </script>
+  </body>
+</html>

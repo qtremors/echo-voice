@@ -1,0 +1,44 @@
+[project]
+name = "echo-voice"
+version = "0.1.0"
+description = "Minimal local real-time voice echo server"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "fastapi>=0.116,<1",
+    "faster-whisper>=1.2,<2",
+    "piper-tts>=1.4,<2",
+    "pydantic-settings>=2.10,<3",
+    "uvicorn>=0.35,<1",
+    "websockets>=15,<17",
+]
+
+[tool.uv]
+exclude-dependencies = ["av", "hf-xet"]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28,<1",
+    "pytest>=8.4,<10",
+    "pytest-asyncio>=1.1,<2",
+    "ruff>=0.12,<1",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+asyncio_mode = "auto"
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.vercel]
+entrypoint = "app.main:app"
+
+[tool.vercel.scripts]
+build = "python scripts/download_models.py"
